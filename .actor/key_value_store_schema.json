@@ -1,17 +1,11 @@
 {
-    "actorSpecification": 1,
+    "actorKeyValueStoreSchemaVersion": 1,
+    "title": "Key-Value Store Schema",
     "collections": {
-        "default": {
-            "title": "Default Key-Value Store",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "INPUT": {
-                        "type": "object",
-                        "description": "Input parameters for the scraper"
-                    }
-                }
-            }
+        "logs": {
+            "title": "Actor Logs",
+            "description": "Actor output and execution logs",
+            "keyPrefix": "OUTPUT_"
         }
     }
 }
