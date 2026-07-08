@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "apify": "^3.2.0",
-    "crawlee": "^3.9.0",
-    "playwright": "*"
+    "crawlee": "^3.9.0"
   }
 }
