@@ -317,6 +317,15 @@ const crawler = new PlaywrightCrawler({
                     break;
                 }
 
+                // Save the first raw RPC response so we can inspect/fix the parser
+                if (pageNum === 0) {
+                    try {
+                        const store = await Actor.openKeyValueStore();
+                        await store.setValue('DEBUG_RPC_RAW', body, { contentType: 'text/plain' });
+                        log.info(`RPC page 0 body length=${body.length}, starts: ${body.slice(0, 80)}`);
+                    } catch { /* ignore */ }
+                }
+
                 const parsed = parseReviewResponse(body);
                 log.info(`RPC page ${pageNum}: parsed ${parsed.length} reviews`);
                 if (!parsed.length) break;
