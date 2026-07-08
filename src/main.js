@@ -1,7 +1,9 @@
 import { Actor, log } from 'apify';
-import { PlaywrightCrawler } from '@crawlee/playwright';
+import { PlaywrightCrawler } from 'crawlee';
 
 await Actor.init();
+
+try {
 
 const input = await Actor.getInput() || {};
 const {
@@ -337,3 +339,11 @@ await crawler.run(requests);
 clearTimeout(killTimer);
 log.info(`🎉 Scraping complete. Total reviews extracted: ${totalReviewsScraped}`);
 await Actor.exit({ statusMessage: `Extracted ${totalReviewsScraped} reviews from ${placeUrls.length} place(s)` });
+
+} catch (err) {
+    log.error(`Fatal error: ${err.message}`);
+    log.error(err.stack);
+    const store = await Actor.openKeyValueStore();
+    await store.setValue('ERROR_LOG', { message: err.message, stack: err.stack });
+    await Actor.exit({ statusMessage: `FATAL: ${err.message}`, exitCode: 1 });
+}
