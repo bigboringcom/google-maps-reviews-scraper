@@ -187,7 +187,10 @@ const crawler = new PlaywrightCrawler({
     browserPoolOptions: { maxOpenPagesPerBrowser: 1 },
 
     preNavigationHooks: [
-        async ({ page }) => {
+        async ({ page }, gotoOptions) => {
+            // Let the SPA fully hydrate and fire its review XHRs
+            gotoOptions.waitUntil = 'networkidle';
+            gotoOptions.timeout = 60000;
             await page.context().addCookies([{
                 name: 'SOCS',
                 value: 'CAISNQgQEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjQwMTA5LjA1X3AwGgJlbiADGgYIgLC_rQY',
@@ -227,7 +230,7 @@ const crawler = new PlaywrightCrawler({
 
         log.info(`Navigating to: ${request.url}`);
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
-        await page.waitForTimeout(4000);
+        await page.waitForTimeout(3000);
 
         // Dismiss consent if present
         try {
@@ -265,20 +268,45 @@ const crawler = new PlaywrightCrawler({
 
         log.info(`Place: "${placeData.placeName}" rating=${placeData.placeOverallRating} total=${placeData.placeTotalReviews}`);
 
+        // Wait for the interactive place panel to hydrate (up to 30s)
+        try {
+            await page.waitForSelector(
+                'button[role="tab"], div[role="feed"], button[jsaction*="pane.rating"], [aria-label*="Reviews"]',
+                { timeout: 30000 }
+            );
+            log.info('Place panel hydrated');
+        } catch {
+            log.warning('Place panel did not hydrate within 30s');
+        }
+        await page.waitForTimeout(2000);
+
         // Open the Reviews tab to trigger the review XHR
         try {
             const tabSelectors = [
                 'button[role="tab"][aria-label*="Reviews"]',
                 'button[role="tab"]:has-text("Reviews")',
                 'button[jsaction*="reviewChart"]',
+                'button[aria-label*="Reviews for"]',
+                'button[jsaction*="pane.rating.moreReviews"]',
             ];
+            let clicked = false;
             for (const sel of tabSelectors) {
                 const tab = page.locator(sel).first();
                 if (await tab.isVisible({ timeout: 3000 }).catch(() => false)) {
                     await tab.click().catch(() => {});
-                    log.info('Opened Reviews tab');
+                    log.info(`Opened Reviews via: ${sel}`);
+                    clicked = true;
                     await page.waitForTimeout(3000);
                     break;
+                }
+            }
+            if (!clicked) {
+                // Fallback: click any element mentioning the review count
+                const rc = page.locator('button:has-text("reviews"), span:has-text("reviews")').first();
+                if (await rc.isVisible({ timeout: 3000 }).catch(() => false)) {
+                    await rc.click().catch(() => {});
+                    log.info('Opened Reviews via review-count fallback');
+                    await page.waitForTimeout(3000);
                 }
             }
         } catch (e) { log.debug(`tab: ${e.message}`); }
@@ -328,11 +356,15 @@ const crawler = new PlaywrightCrawler({
         }));
 
         if (finalReviews.length) {
-            await Actor.pushData(finalReviews);
-            totalReviewsScraped += finalReviews.length;
-            log.info(`✅ Pushed ${finalReviews.length} reviews for "${placeData.placeName}"`);
+            try {
+                await Actor.pushData(finalReviews);
+                totalReviewsScraped += finalReviews.length;
+                log.info(`✅ Pushed ${finalReviews.length} reviews for "${placeData.placeName}"`);
+            } catch (e) {
+                log.error(`pushData failed: ${e.message}`);
+            }
         } else {
-            // Save a screenshot so we can see what happened, and push a diagnostic row
+            // Save a screenshot + HTML so we can see what happened
             try {
                 const shot = await page.screenshot({ fullPage: false });
                 const store = await Actor.openKeyValueStore();
@@ -341,29 +373,31 @@ const crawler = new PlaywrightCrawler({
                 await store.setValue('DEBUG_HTML', html, { contentType: 'text/html' });
             } catch { /* ignore */ }
 
-            await Actor.pushData([{
-                reviewerName: null,
-                rating: null,
-                reviewText: `NO_REVIEWS_CAPTURED. Place="${placeData.placeName}". Captured XHR reviews=0. Check DEBUG_SCREENSHOT/DEBUG_HTML in KV store.`,
-                placeName: placeData.placeName,
-                placeOverallRating: placeData.placeOverallRating,
-                placeTotalReviews: placeData.placeTotalReviews,
-                placeUrl: request.url,
-            }]);
-            totalReviewsScraped += 1;
+            // Diagnostic row — only valid-typed fields (no nulls for int/number fields)
+            try {
+                await Actor.pushData([{
+                    reviewerName: 'NO_REVIEWS_CAPTURED',
+                    reviewText: `Place="${placeData.placeName}". Captured 0 review XHRs. See DEBUG_SCREENSHOT/DEBUG_HTML.`,
+                    placeName: placeData.placeName,
+                    placeUrl: request.url,
+                }]);
+            } catch (e) {
+                log.error(`diagnostic pushData failed: ${e.message}`);
+            }
             log.warning(`No reviews captured for "${placeData.placeName}"`);
         }
     },
 
     async failedRequestHandler({ request }, error) {
         log.error(`Request failed: ${request.url} — ${error.message}`);
-        await Actor.pushData([{
-            reviewerName: null,
-            rating: null,
-            reviewText: `REQUEST_FAILED: ${error.message}`,
-            placeName: 'ERROR',
-            placeUrl: request.url,
-        }]);
+        try {
+            await Actor.pushData([{
+                reviewerName: 'REQUEST_FAILED',
+                reviewText: `${error.message}`,
+                placeName: 'ERROR',
+                placeUrl: request.url,
+            }]);
+        } catch { /* ignore */ }
     },
 });
 
