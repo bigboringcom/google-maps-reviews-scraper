@@ -188,8 +188,8 @@ const crawler = new PlaywrightCrawler({
 
     preNavigationHooks: [
         async ({ page }, gotoOptions) => {
-            // Let the SPA fully hydrate and fire its review XHRs
-            gotoOptions.waitUntil = 'networkidle';
+            // networkidle never fires on Google Maps (live app). Use domcontentloaded.
+            gotoOptions.waitUntil = 'domcontentloaded';
             gotoOptions.timeout = 60000;
             await page.context().addCookies([{
                 name: 'SOCS',
@@ -208,10 +208,32 @@ const crawler = new PlaywrightCrawler({
     async requestHandler({ page, request }) {
         const { maxReviews } = request.userData;
         const target = maxReviews || 100;
+        const captured = [];
+        let sniffedFtid = null;
+
+        // Intercept Google's own background XHRs: grab reviews + the feature ID
+        page.on('response', async (response) => {
+            const url = response.url();
+            if (url.includes('listugcposts') || url.includes('listentitiesreviews') || url.includes('/maps/preview/place')) {
+                try {
+                    const body = await response.text();
+                    if (!sniffedFtid) {
+                        const m = body.match(/(0x[0-9a-f]{8,}:0x[0-9a-f]{8,})/i);
+                        if (m) { sniffedFtid = m[1]; log.info(`Sniffed featureId from XHR: ${sniffedFtid}`); }
+                    }
+                    const parsed = parseReviewResponse(body);
+                    if (parsed.length) {
+                        captured.push(...parsed);
+                        log.info(`Captured ${parsed.length} reviews from background XHR (total ${captured.length})`);
+                    }
+                } catch { /* ignore */ }
+            }
+        });
 
         log.info(`Navigating to: ${request.url}`);
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
-        await page.waitForTimeout(3000);
+        // Give Google's own background requests time to fire (preview/place, reviews)
+        await page.waitForTimeout(8000);
 
         // Dismiss consent if present
         try {
@@ -255,22 +277,24 @@ const crawler = new PlaywrightCrawler({
         const pageHtml = await page.content().catch(() => '');
 
         // Feature ID looks like 0x6b12ae401e8b983f:0x5017d681632ccc0
-        let featureId = null;
+        // Prefer the one sniffed from Google's own XHR responses.
+        let featureId = sniffedFtid;
         const fidPatterns = [
             /!1s(0x[0-9a-f]+:0x[0-9a-f]+)/i,
             /(0x[0-9a-f]{8,}:0x[0-9a-f]{8,})/i,
             /"(0x[0-9a-f]{8,}:0x[0-9a-f]{8,})"/i,
         ];
-        for (const src of [finalUrl, pageHtml]) {
-            for (const re of fidPatterns) {
-                const m = src.match(re);
-                if (m) { featureId = m[1]; break; }
+        if (!featureId) {
+            for (const src of [finalUrl, pageHtml]) {
+                for (const re of fidPatterns) {
+                    const m = src.match(re);
+                    if (m) { featureId = m[1]; break; }
+                }
+                if (featureId) break;
             }
-            if (featureId) break;
         }
-        log.info(`Place="${placeData.placeName}" featureId=${featureId || 'NOT FOUND'} url=${finalUrl.slice(0, 120)}`);
+        log.info(`Place="${placeData.placeName}" featureId=${featureId || 'NOT FOUND'} sniffedReviews=${captured.length} url=${finalUrl.slice(0, 120)}`);
 
-        const captured = [];
         const SORT_PB = { relevant: 1, newest: 2, highest: 3, lowest: 4 };
         const sortCode = SORT_PB[sortBy] || 2;
 
