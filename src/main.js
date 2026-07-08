@@ -1,5 +1,5 @@
 import { Actor, log } from 'apify';
-import { PlaywrightCrawler } from 'crawlee';
+import { PlaywrightCrawler } from '@crawlee/playwright';
 
 await Actor.init();
 
