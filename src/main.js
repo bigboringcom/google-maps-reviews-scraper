@@ -33,7 +33,7 @@ const SORT_BUTTON_MAP = {
 // Configure proxy
 const proxyConfig = proxyConfiguration
     ? await Actor.createProxyConfiguration(proxyConfiguration)
-    : await Actor.createProxyConfiguration({ useApifyProxy: true, apifyProxyGroups: ['GOOGLE_SERP'] });
+    : await Actor.createProxyConfiguration({ useApifyProxy: true });
 
 let totalReviewsScraped = 0;
 
@@ -50,11 +50,6 @@ const crawler = new PlaywrightCrawler({
     navigationTimeoutSecs: 60,
     requestHandlerTimeoutSecs: 120,
     headless: true,
-    launchContext: {
-        launchOptions: {
-            args: ['--disable-blink-features=AutomationControlled'],
-        },
-    },
     browserPoolOptions: {
         maxOpenPagesPerBrowser: 1,
     },
