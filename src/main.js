@@ -207,26 +207,7 @@ const crawler = new PlaywrightCrawler({
 
     async requestHandler({ page, request }) {
         const { maxReviews } = request.userData;
-        const captured = [];
-
-        // PRIMARY METHOD: intercept the review XHR responses
-        page.on('response', async (response) => {
-            const url = response.url();
-            if (url.includes('/maps/rpc/listugcposts') ||
-                url.includes('listentitiesreviews') ||
-                url.includes('/review/listentitiesreviews')) {
-                try {
-                    const body = await response.text();
-                    const parsed = parseReviewResponse(body);
-                    if (parsed.length) {
-                        captured.push(...parsed);
-                        log.info(`Intercepted ${parsed.length} reviews (total captured: ${captured.length})`);
-                    }
-                } catch (e) {
-                    log.debug(`Response capture failed: ${e.message}`);
-                }
-            }
-        });
+        const target = maxReviews || 100;
 
         log.info(`Navigating to: ${request.url}`);
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
@@ -244,7 +225,7 @@ const crawler = new PlaywrightCrawler({
             }
         } catch { /* ignore */ }
 
-        // Grab place metadata (best-effort, never throw)
+        // Grab place metadata (best-effort)
         let placeData = { placeName: 'Unknown', placeOverallRating: null, placeTotalReviews: null, placeAddress: '' };
         try {
             placeData = await page.evaluate(() => {
@@ -266,69 +247,69 @@ const crawler = new PlaywrightCrawler({
             });
         } catch (e) { log.debug(`metadata: ${e.message}`); }
 
-        log.info(`Place: "${placeData.placeName}" rating=${placeData.placeOverallRating} total=${placeData.placeTotalReviews}`);
+        // DIRECT API METHOD: resolve the place feature ID, then call listugcposts.
+        // The interactive Maps UI often won't hydrate headless, so we skip it and
+        // hit Google's internal review RPC directly from within the page context
+        // (so it uses the browser's cookies/session/IP).
+        const finalUrl = page.url();
+        const pageHtml = await page.content().catch(() => '');
 
-        // Wait for the interactive place panel to hydrate (up to 30s)
-        try {
-            await page.waitForSelector(
-                'button[role="tab"], div[role="feed"], button[jsaction*="pane.rating"], [aria-label*="Reviews"]',
-                { timeout: 30000 }
-            );
-            log.info('Place panel hydrated');
-        } catch {
-            log.warning('Place panel did not hydrate within 30s');
+        // Feature ID looks like 0x6b12ae401e8b983f:0x5017d681632ccc0
+        let featureId = null;
+        const fidPatterns = [
+            /!1s(0x[0-9a-f]+:0x[0-9a-f]+)/i,
+            /(0x[0-9a-f]{8,}:0x[0-9a-f]{8,})/i,
+            /"(0x[0-9a-f]{8,}:0x[0-9a-f]{8,})"/i,
+        ];
+        for (const src of [finalUrl, pageHtml]) {
+            for (const re of fidPatterns) {
+                const m = src.match(re);
+                if (m) { featureId = m[1]; break; }
+            }
+            if (featureId) break;
         }
-        await page.waitForTimeout(2000);
+        log.info(`Place="${placeData.placeName}" featureId=${featureId || 'NOT FOUND'} url=${finalUrl.slice(0, 120)}`);
 
-        // Open the Reviews tab to trigger the review XHR
-        try {
-            const tabSelectors = [
-                'button[role="tab"][aria-label*="Reviews"]',
-                'button[role="tab"]:has-text("Reviews")',
-                'button[jsaction*="reviewChart"]',
-                'button[aria-label*="Reviews for"]',
-                'button[jsaction*="pane.rating.moreReviews"]',
-            ];
-            let clicked = false;
-            for (const sel of tabSelectors) {
-                const tab = page.locator(sel).first();
-                if (await tab.isVisible({ timeout: 3000 }).catch(() => false)) {
-                    await tab.click().catch(() => {});
-                    log.info(`Opened Reviews via: ${sel}`);
-                    clicked = true;
-                    await page.waitForTimeout(3000);
+        const captured = [];
+        const SORT_PB = { relevant: 1, newest: 2, highest: 3, lowest: 4 };
+        const sortCode = SORT_PB[sortBy] || 2;
+
+        if (featureId) {
+            // Fetch reviews page-by-page via the internal RPC, inside the browser
+            let pageToken = '';
+            let pageNum = 0;
+            while (captured.length < target && pageNum < 30) {
+                const pb = `!1m6!1s${featureId}!6m4!4m1!1e1!4m1!1e3!2m2!1i20!2s${pageToken}!5m2!1s!7e81!8m9!2b1!3b1!5b1!7b1!11m0!13m1!1e${sortCode}`;
+                const apiUrl = `https://www.google.com/maps/rpc/listugcposts?authuser=0&hl=${language}&gl=us&pb=${encodeURIComponent(pb)}`;
+
+                let body = '';
+                try {
+                    body = await page.evaluate(async (u) => {
+                        const res = await fetch(u, { credentials: 'include' });
+                        return await res.text();
+                    }, apiUrl);
+                } catch (e) {
+                    log.warning(`fetch page ${pageNum} failed: ${e.message}`);
                     break;
                 }
-            }
-            if (!clicked) {
-                // Fallback: click any element mentioning the review count
-                const rc = page.locator('button:has-text("reviews"), span:has-text("reviews")').first();
-                if (await rc.isVisible({ timeout: 3000 }).catch(() => false)) {
-                    await rc.click().catch(() => {});
-                    log.info('Opened Reviews via review-count fallback');
-                    await page.waitForTimeout(3000);
-                }
-            }
-        } catch (e) { log.debug(`tab: ${e.message}`); }
 
-        // Scroll the reviews feed to trigger pagination XHRs until we have enough
-        const target = maxReviews || 100;
-        let stagnant = 0;
-        for (let i = 0; i < 60 && captured.length < target && stagnant < 5; i++) {
-            const before = captured.length;
-            try {
-                await page.evaluate(() => {
-                    const feed = document.querySelector('div[role="feed"]')
-                        || Array.from(document.querySelectorAll('div[tabindex="-1"]')).find(d => d.scrollHeight > d.clientHeight + 200);
-                    if (feed) feed.scrollTop = feed.scrollHeight;
-                    else window.scrollBy(0, 2000);
-                });
-            } catch { /* ignore */ }
-            await page.waitForTimeout(1800);
-            if (captured.length === before) stagnant++; else stagnant = 0;
+                const parsed = parseReviewResponse(body);
+                log.info(`RPC page ${pageNum}: parsed ${parsed.length} reviews`);
+                if (!parsed.length) break;
+                captured.push(...parsed);
+
+                // Extract next page token (a long string near the start of the response)
+                const clean = body.replace(/^\)\]\}'\n?/, '');
+                const tokMatch = clean.match(/"([A-Za-z0-9_=-]{40,})"/);
+                const newToken = tokMatch ? tokMatch[1] : '';
+                if (!newToken || newToken === pageToken) break;
+                pageToken = newToken;
+                pageNum++;
+                await page.waitForTimeout(600 + Math.random() * 600);
+            }
         }
 
-        // Dedupe by reviewer+text+time
+        // Dedupe
         const seen = new Set();
         const unique = [];
         for (const r of captured) {
