@@ -45,7 +45,6 @@ const crawler = new PlaywrightCrawler({
     headless: true,
     browserPoolOptions: {
         maxOpenPagesPerBrowser: 1,
-        useFingerprints: true,
     },
     preNavigationHooks: [
         async ({ page }) => {
