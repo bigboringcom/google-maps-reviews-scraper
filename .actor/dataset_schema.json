@@ -1,0 +1,38 @@
+{
+    "actorSpecification": 1,
+    "fields": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "reviewerName": { "title": "Reviewer Name", "type": "string", "description": "Name of the person who left the review" },
+            "rating": { "title": "Rating", "type": "integer", "description": "Star rating (1-5)" },
+            "reviewText": { "title": "Review Text", "type": "string", "description": "Full text content of the review" },
+            "publishedAt": { "title": "Published Date", "type": "string", "description": "When the review was published" },
+            "reviewerProfileUrl": { "title": "Reviewer Profile URL", "type": "string", "description": "Link to reviewer Google profile" },
+            "reviewerTotalReviews": { "title": "Reviewer Total Reviews", "type": "integer", "description": "Total reviews by this person" },
+            "isLocalGuide": { "title": "Is Local Guide", "type": "boolean", "description": "Whether reviewer is a Google Local Guide" },
+            "ownerResponse": { "title": "Owner Response", "type": "string", "description": "Business owner reply to review" },
+            "ownerResponseDate": { "title": "Owner Response Date", "type": "string", "description": "When the owner responded" },
+            "reviewLikes": { "title": "Review Likes", "type": "integer", "description": "Number of likes on the review" },
+            "reviewPhotos": { "title": "Review Photos", "type": "array", "description": "URLs of photos attached to the review" },
+            "placeName": { "title": "Place Name", "type": "string", "description": "Name of the business" },
+            "placeAddress": { "title": "Place Address", "type": "string", "description": "Address of the business" },
+            "placeOverallRating": { "title": "Place Overall Rating", "type": "number", "description": "Overall rating of the place" },
+            "placeTotalReviews": { "title": "Place Total Reviews", "type": "integer", "description": "Total reviews for the place" },
+            "placeUrl": { "title": "Place URL", "type": "string", "description": "Google Maps URL" }
+        },
+        "additionalProperties": true
+    },
+    "views": {
+        "overview": {
+            "title": "Reviews Overview",
+            "transformation": { "fields": ["placeName", "reviewerName", "rating", "reviewText", "publishedAt", "ownerResponse"] },
+            "display": { "component": "table" }
+        },
+        "ratings": {
+            "title": "Ratings Analysis",
+            "transformation": { "fields": ["placeName", "reviewerName", "rating", "isLocalGuide", "reviewerTotalReviews", "reviewLikes"] },
+            "display": { "component": "table" }
+        }
+    }
+}

@@ -1,0 +1,20 @@
+{
+    "openapi": "3.0.0",
+    "info": {
+        "title": "Google Maps Reviews Scraper Standby API",
+        "version": "1.0.0",
+        "description": "Extract Google Maps reviews via HTTP API in standby mode."
+    },
+    "paths": {
+        "/": {
+            "get": {
+                "summary": "Health check / Readiness probe",
+                "responses": {
+                    "200": {
+                        "description": "Actor is ready"
+                    }
+                }
+            }
+        }
+    }
+}

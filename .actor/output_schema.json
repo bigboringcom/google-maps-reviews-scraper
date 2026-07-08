@@ -1,0 +1,12 @@
+{
+    "actorOutputSchemaVersion": 1,
+    "title": "Output schema for Google Maps Reviews Scraper",
+    "properties": {
+        "results": {
+            "type": "string",
+            "title": "Extracted Reviews",
+            "description": "Google Maps reviews with reviewer info, rating, text, date, and owner responses.",
+            "template": "{{links.apiDefaultDatasetUrl}}/items"
+        }
+    }
+}

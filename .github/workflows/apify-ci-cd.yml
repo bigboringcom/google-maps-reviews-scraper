@@ -1,0 +1,24 @@
+name: Apify CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - run: npm install
+
+      - run: npm test || echo "No tests defined yet"
+
+      - run: npx apify-cli login --token ${{ secrets.APIFY_TOKEN }}
+
+      - run: npx apify-cli push

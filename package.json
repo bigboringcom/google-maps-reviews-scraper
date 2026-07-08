@@ -1,0 +1,14 @@
+{
+  "name": "google-maps-reviews-scraper",
+  "version": "1.0.0",
+  "description": "Extract Google Maps reviews for any business. Get reviewer name, rating, text, date, and response. Cheaper and faster than full Google Maps scrapers.",
+  "main": "src/main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js"
+  },
+  "dependencies": {
+    "apify": "^3.2.0",
+    "crawlee": "^3.9.0"
+  }
+}

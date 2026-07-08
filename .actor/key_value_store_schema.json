@@ -1,0 +1,17 @@
+{
+    "actorSpecification": 1,
+    "collections": {
+        "default": {
+            "title": "Default Key-Value Store",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "INPUT": {
+                        "type": "object",
+                        "description": "Input parameters for the scraper"
+                    }
+                }
+            }
+        }
+    }
+}

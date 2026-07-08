@@ -1,0 +1,30 @@
+{
+    "actorSpecification": 1,
+    "name": "google-maps-reviews-scraper",
+    "title": "Google Maps Reviews Scraper",
+    "description": "Extract reviews from any Google Maps business listing. Get reviewer name, rating, review text, date, owner response, and more. Pay only for reviews — no per-place fees.",
+    "version": "1.0",
+    "meta": {
+        "templateId": "project-cheerio-crawler",
+        "generatedBy": "Kiro with Claude Sonnet 4"
+    },
+    "dockerfile": "./Dockerfile",
+    "pricing": {
+        "pricingModel": "PAY_PER_RESULT",
+        "pricePerDatasetItem": 0.003
+    },
+    "storages": {
+        "dataset": "./dataset_schema.json",
+        "keyValueStore": "./key_value_store_schema.json"
+    },
+    "webServerSchema": "./openapi.json",
+    "usesStandbyMode": true,
+    "output": "./output_schema.json",
+    "categories": [
+        "LEAD_GENERATION",
+        "BUSINESS",
+        "MARKETING"
+    ],
+    "seoTitle": "Google Maps Reviews Scraper | Extract Business Reviews API",
+    "seoDescription": "Scrape Google Maps reviews at scale. Extract reviewer name, star rating, review text, date, photos, and owner responses. Pay per review — no per-place fees. Cheaper alternative to full Google Maps scrapers."
+}
