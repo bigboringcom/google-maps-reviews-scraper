@@ -31,6 +31,7 @@
             "title": "Language",
             "type": "string",
             "description": "Language code for reviews (e.g. en, es, fr, de, ja). Leave empty for default.",
+            "editor": "textfield",
             "default": "en"
         },
         "includeOwnerResponse": {
