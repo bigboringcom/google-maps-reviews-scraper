@@ -38,10 +38,10 @@ let totalReviewsScraped = 0;
 
 const crawler = new PlaywrightCrawler({
     proxyConfiguration: proxyConfig,
-    maxRequestRetries: 3,
+    maxRequestRetries: 2,
     maxConcurrency: 1,
-    navigationTimeoutSecs: 90,
-    requestHandlerTimeoutSecs: 180,
+    navigationTimeoutSecs: 60,
+    requestHandlerTimeoutSecs: 120,
     headless: true,
     browserPoolOptions: {
         maxOpenPagesPerBrowser: 1,
@@ -62,9 +62,9 @@ const crawler = new PlaywrightCrawler({
         const { maxReviews } = request.userData;
         log.info(`Navigating to: ${request.url}`);
 
-        // Wait for page to be interactive
-        await page.waitForLoadState('domcontentloaded', { timeout: 60000 });
-        await page.waitForTimeout(3000);
+        // Wait for page to be interactive — use shorter timeout and don't throw
+        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(5000);
 
         // Handle consent dialog if it appears
         try {
@@ -90,8 +90,8 @@ const crawler = new PlaywrightCrawler({
         }
 
         // Wait for Google Maps to fully load — look for key elements
-        await page.waitForSelector('h1, [role="main"], #searchboxinput', { timeout: 30000 })
-            .catch(() => log.warning('Main page elements not found within timeout'));
+        await page.waitForSelector('h1, [role="main"], #searchboxinput', { timeout: 15000 })
+            .catch(() => log.warning('Main page elements not found within 15s timeout'));
 
         // Additional wait for dynamic content
         await page.waitForTimeout(3000);
