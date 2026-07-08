@@ -5,7 +5,7 @@
     "description": "Extract reviews from any Google Maps business listing. Get reviewer name, rating, review text, date, owner response, and more. Pay only for reviews — no per-place fees.",
     "version": "1.0",
     "meta": {
-        "templateId": "project-cheerio-crawler",
+        "templateId": "project-playwright-crawler",
         "generatedBy": "Kiro with Claude Sonnet 4"
     },
     "dockerfile": "./Dockerfile",
