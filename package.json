@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "apify": "^3.2.0",
-    "crawlee": "^3.9.0"
+    "crawlee": "^3.9.0",
+    "got-scraping": "^4.0.0"
   }
 }

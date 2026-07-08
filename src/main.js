@@ -1,5 +1,5 @@
-import { CheerioCrawler, log, RequestQueue } from 'crawlee';
-import { Actor } from 'apify';
+import { Actor, log } from 'apify';
+import { gotScraping } from 'got-scraping';
 
 await Actor.init();
 
@@ -20,282 +20,187 @@ if (!placeUrls.length) {
     await Actor.exit({ statusMessage: 'No place URLs provided' });
 }
 
-// Sort mapping for Google Maps internal sort parameter
-const SORT_MAP = {
-    newest: 1,
-    highest: 3,
-    lowest: 4,
-    relevant: 0,
-};
+// Sort mapping for Google's internal sort parameter
+const SORT_MAP = { newest: 1, highest: 3, lowest: 4, relevant: 0 };
+const sortParam = SORT_MAP[sortBy] ?? 1;
 
-// Kill switch to prevent runaway costs
+// Configure proxy
+const proxyConfig = proxyConfiguration
+    ? await Actor.createProxyConfiguration(proxyConfiguration)
+    : await Actor.createProxyConfiguration({ useApifyProxy: true, apifyProxyGroups: ['GOOGLE_SERP'] });
+
+let totalReviewsScraped = 0;
+let killed = false;
+
+// Kill switch
 const killTimer = setTimeout(() => {
     log.warning(`Maximum run time of ${maxRunTimeMinutes} minutes reached. Shutting down gracefully.`);
-    crawler.teardown();
+    killed = true;
 }, maxRunTimeMinutes * 60 * 1000);
 
 /**
- * Extract the place feature ID (data ID) from a Google Maps URL.
- * Google Maps URLs contain the place ID in the format: 0x...:0x...
- * or as a CID, or we can get it from the place page HTML.
+ * Extract the place feature ID from Google Maps HTML page.
+ * We fetch the place page and look for the data-pid or ludocid in the response.
  */
-function extractPlaceId(url) {
-    // Try to extract from URL pattern like /place/.../@lat,lng,.../data=!3m1!4b1!4m...
-    // The FID is usually in the data parameter
-    const fidMatch = url.match(/!1s(0x[a-f0-9]+:0x[a-f0-9]+)/);
-    if (fidMatch) return fidMatch[1];
-
-    // Try CID pattern
-    const cidMatch = url.match(/cid=(\d+)/);
-    if (cidMatch) return cidMatch[1];
-
-    return null;
-}
-
-/**
- * Parse Google Maps internal JSON response for reviews.
- * Google Maps uses a custom protobuf-like JSON format.
- */
-function parseReviewsFromResponse(responseText) {
-    const reviews = [];
-
-    try {
-        // Google returns )]}' prefix then JSON array
-        const cleanText = responseText.replace(/^\)\]\}'\n/, '');
-        const data = JSON.parse(cleanText);
-
-        // Navigate the nested structure to find review arrays
-        // The structure varies but reviews are typically in deep nested arrays
-        const reviewArrays = findReviewArrays(data);
-
-        for (const reviewData of reviewArrays) {
-            const review = extractReviewFields(reviewData);
-            if (review) reviews.push(review);
-        }
-    } catch (err) {
-        log.debug(`Failed to parse response: ${err.message}`);
-    }
-
-    return reviews;
-}
-
-/**
- * Recursively find arrays that look like review data.
- * Reviews typically have a structure with name, rating (1-5), and text.
- */
-function findReviewArrays(data, depth = 0) {
-    const reviews = [];
-    if (depth > 15 || !data) return reviews;
-
-    if (Array.isArray(data)) {
-        // Check if this looks like a single review entry
-        // Reviews typically have: [null, null, null, [null, null, reviewerName], ...]
-        if (isReviewEntry(data)) {
-            reviews.push(data);
-            return reviews;
-        }
-
-        // Otherwise recurse into each element
-        for (const item of data) {
-            reviews.push(...findReviewArrays(item, depth + 1));
-        }
-    }
-
-    return reviews;
-}
-
-/**
- * Heuristic to determine if an array entry looks like a review.
- * Google Maps reviews in the protobuf format have identifiable patterns.
- */
-function isReviewEntry(arr) {
-    if (!Array.isArray(arr) || arr.length < 4) return false;
-
-    // A review entry typically has:
-    // - A string ID at position [0]
-    // - Reviewer info nested somewhere with a name string
-    // - A rating integer (1-5)
-    // - Review text string
-    try {
-        // Check for reviewer name pattern - usually arr[1] or arr[0] contains nested arrays with strings
-        const hasString = arr.some(item => typeof item === 'string' && item.length > 0 && item.length < 200);
-        const hasNumber = arr.some(item => typeof item === 'number' && item >= 1 && item <= 5);
-
-        // More specific: look for the typical review structure
-        // [reviewId, [authorInfo...], rating, [null, text], timestamp, ...]
-        if (typeof arr[0] === 'string' && arr[0].length > 5) {
-            // This might be a review ID
-            if (Array.isArray(arr[1]) && hasNumber) {
-                return true;
-            }
-        }
-
-        return false;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Extract structured review fields from raw review data array.
- */
-function extractReviewFields(reviewData) {
-    try {
-        if (!Array.isArray(reviewData)) return null;
-
-        // Navigate the known Google Maps review structure
-        // This varies by endpoint version, so we use multiple extraction strategies
-
-        let reviewerName = null;
-        let rating = null;
-        let reviewText = null;
-        let publishedAt = null;
-        let reviewerProfileUrl = null;
-        let reviewerTotalReviews = null;
-        let isLocalGuide = false;
-        let ownerResponse = null;
-        let ownerResponseDate = null;
-        let reviewLikes = 0;
-        let reviewPhotos = [];
-
-        // Strategy: Walk known positions in the review protobuf
-        // Position [1] typically contains author info
-        if (Array.isArray(reviewData[1])) {
-            const authorInfo = reviewData[1];
-            // Author name is usually a string in the first few positions
-            for (const item of authorInfo) {
-                if (typeof item === 'string' && item.length > 0 && item.length < 100 && !item.startsWith('http')) {
-                    reviewerName = item;
-                    break;
-                }
-            }
-            // Profile URL
-            for (const item of authorInfo) {
-                if (typeof item === 'string' && item.includes('/contrib/')) {
-                    reviewerProfileUrl = item;
-                    break;
-                }
-            }
-        }
-
-        // Rating is usually a standalone integer 1-5
-        for (let i = 2; i < Math.min(reviewData.length, 8); i++) {
-            if (typeof reviewData[i] === 'number' && reviewData[i] >= 1 && reviewData[i] <= 5) {
-                rating = reviewData[i];
-                break;
-            }
-        }
-
-        // Review text - look for longer strings
-        for (let i = 2; i < reviewData.length; i++) {
-            if (typeof reviewData[i] === 'string' && reviewData[i].length > 10 && !reviewData[i].startsWith('http')) {
-                reviewText = reviewData[i];
-                break;
-            }
-            if (Array.isArray(reviewData[i])) {
-                for (const item of reviewData[i]) {
-                    if (typeof item === 'string' && item.length > 10 && !item.startsWith('http')) {
-                        reviewText = item;
-                        break;
-                    }
-                }
-                if (reviewText) break;
-            }
-        }
-
-        // Timestamp - look for large numbers (unix timestamps in ms)
-        for (let i = 0; i < reviewData.length; i++) {
-            if (typeof reviewData[i] === 'number' && reviewData[i] > 1000000000000) {
-                publishedAt = new Date(reviewData[i]).toISOString();
-                break;
-            }
-            // Also check for relative time strings like "2 months ago"
-            if (typeof reviewData[i] === 'string' && reviewData[i].match(/\d+\s+(day|week|month|year|hour)s?\s+ago/i)) {
-                publishedAt = reviewData[i];
-            }
-        }
-
-        // Only return if we have at minimum a rating (the core data point)
-        if (rating === null) return null;
-
-        return {
-            reviewerName: reviewerName || 'Anonymous',
-            rating,
-            reviewText: reviewText || '',
-            publishedAt: publishedAt || 'Unknown',
-            reviewerProfileUrl: reviewerProfileUrl || '',
-            reviewerTotalReviews: reviewerTotalReviews || 0,
-            isLocalGuide,
-            ownerResponse: ownerResponse || '',
-            ownerResponseDate: ownerResponseDate || '',
-            reviewLikes,
-            reviewPhotos,
-        };
-    } catch (err) {
-        log.debug(`Failed to extract review fields: ${err.message}`);
-        return null;
-    }
-}
-
-/**
- * Extract place info and initial reviews from the place page HTML.
- * This is the fallback/primary approach using the rendered page data.
- */
-function extractFromPlacePage($, url) {
-    const placeInfo = {
-        placeName: '',
-        placeAddress: '',
-        placeOverallRating: null,
-        placeTotalReviews: null,
-        placeUrl: url,
-    };
-
-    // Extract place name from title or specific elements
-    placeInfo.placeName = $('h1').first().text().trim()
-        || $('[data-attrid="title"]').text().trim()
-        || $('title').text().replace(/ - Google Maps$/, '').trim();
-
-    // Extract overall rating
-    const ratingText = $('[class*="rating"], .fontDisplayLarge').first().text().trim();
-    const ratingMatch = ratingText.match(/(\d+[.,]\d)/);
-    if (ratingMatch) placeInfo.placeOverallRating = parseFloat(ratingMatch[1].replace(',', '.'));
-
-    // Extract total review count
-    const bodyText = $('body').text();
-    const reviewCountMatch = bodyText.match(/([\d,]+)\s*reviews?/i);
-    if (reviewCountMatch) placeInfo.placeTotalReviews = parseInt(reviewCountMatch[1].replace(/,/g, ''), 10);
-
-    // Extract address
-    const addressEl = $('[data-item-id="address"], [aria-label*="Address"]').first();
-    placeInfo.placeAddress = addressEl.text().trim() || '';
-
-    // Try to extract reviews directly from page scripts
-    const reviews = [];
-    $('script').each((_, el) => {
-        const scriptText = $(el).html() || '';
-        if (scriptText.includes('reviewerName') || scriptText.includes('reviewText') || scriptText.length > 5000) {
-            // Try to find review data in window.__WEB_COMMUNITIES_CONFIG__ or similar
-            const parsed = parseReviewsFromScript(scriptText);
-            reviews.push(...parsed);
-        }
+async function fetchPlaceData(url, proxyUrl) {
+    const response = await gotScraping({
+        url,
+        proxyUrl,
+        headers: {
+            'Accept-Language': `${language},en;q=0.9`,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        timeout: { request: 30000 },
+        followRedirect: true,
     });
 
-    // Also try to extract from visible review elements on the page
-    $('[data-review-id], [class*="review"]').each((_, el) => {
-        const reviewEl = $(el);
-        const name = reviewEl.find('[class*="name"], [aria-label]').first().text().trim();
-        const ratingEl = reviewEl.find('[aria-label*="star"], [class*="star"]').first();
-        const ratingLabel = ratingEl.attr('aria-label') || '';
-        const starMatch = ratingLabel.match(/(\d)/);
-        const text = reviewEl.find('[class*="text"], [class*="body"]').first().text().trim();
-        const date = reviewEl.find('[class*="date"], [class*="time"]').first().text().trim();
+    const html = response.body;
 
-        if (name || text || starMatch) {
+    // Extract place name from title
+    const titleMatch = html.match(/<title>([^<]+)<\/title>/);
+    let placeName = titleMatch ? titleMatch[1].replace(/ - Google Maps$/, '').trim() : 'Unknown Place';
+
+    // Extract feature ID (data-featureId or embedded in scripts)
+    // Look for patterns like: "0x6b12ae401e8b983f:0x5017d681632ccc0"
+    const fidMatch = html.match(/0x[0-9a-f]+:0x[0-9a-f]+/);
+    const featureId = fidMatch ? fidMatch[0] : null;
+
+    // Extract overall rating
+    let placeOverallRating = null;
+    const ratingMatch = html.match(/"([0-9]\.[0-9])" aria-label="[0-9.]+ stars"/);
+    if (ratingMatch) placeOverallRating = parseFloat(ratingMatch[1]);
+
+    // Extract total review count
+    let placeTotalReviews = null;
+    const countMatch = html.match(/([0-9,]+)\s*review/i);
+    if (countMatch) placeTotalReviews = parseInt(countMatch[1].replace(/,/g, ''), 10);
+
+    // Extract address
+    let placeAddress = '';
+    const addrMatch = html.match(/"formatted_address"\s*:\s*"([^"]+)"/);
+    if (addrMatch) placeAddress = addrMatch[1];
+
+    return {
+        featureId,
+        placeName,
+        placeOverallRating,
+        placeTotalReviews,
+        placeAddress,
+        placeUrl: url,
+    };
+}
+
+/**
+ * Fetch reviews using Google Maps' internal listugcposts endpoint.
+ * This is the protobuf-based API that Google Maps uses internally.
+ * We construct the request to fetch review data.
+ */
+async function fetchReviews(featureId, placeData, proxyUrl, nextPageToken = null) {
+    // Google Maps uses a specific URL pattern for fetching reviews
+    // The /maps/rpc/listugcposts endpoint with protobuf payloads
+    // Alternative approach: use the public reviews URL with sort parameter
+
+    // Construct the reviews URL using Google's lighter review endpoint
+    const baseUrl = `https://www.google.com/maps/preview/review/listentitiesreviews`;
+
+    // Build the protobuf-like request body
+    // This is the actual format Google Maps uses for pagination
+    const pbBody = buildReviewRequestBody(featureId, sortParam, nextPageToken);
+
+    try {
+        const response = await gotScraping({
+            url: `https://www.google.com/maps/rpc/listugcposts?authuser=0&hl=${language}&gl=au&pb=${pbBody}`,
+            proxyUrl,
+            headers: {
+                'Accept-Language': `${language},en;q=0.9`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Referer': 'https://www.google.com/',
+            },
+            timeout: { request: 30000 },
+        });
+
+        return parseReviewResponse(response.body, placeData);
+    } catch (err) {
+        log.debug(`Review fetch via RPC failed: ${err.message}. Trying alternative approach.`);
+        return { reviews: [], nextPageToken: null };
+    }
+}
+
+/**
+ * Alternative approach: scrape reviews from Google search results.
+ * Google shows reviews when you search for "PLACE_NAME reviews"
+ */
+async function fetchReviewsFromSearch(placeData, proxyUrl, page = 0) {
+    const query = encodeURIComponent(`${placeData.placeName} reviews`);
+    const start = page * 10;
+    const url = `https://www.google.com/search?q=${query}&hl=${language}&tbm=lcl&start=${start}`;
+
+    try {
+        const response = await gotScraping({
+            url,
+            proxyUrl,
+            headers: {
+                'Accept-Language': `${language},en;q=0.9`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+            timeout: { request: 30000 },
+        });
+
+        return parseSearchReviews(response.body, placeData);
+    } catch (err) {
+        log.debug(`Search-based review fetch failed: ${err.message}`);
+        return [];
+    }
+}
+
+/**
+ * Fetch reviews by visiting the Google Maps place page with reviews tab.
+ * Parse the embedded JSON data that Google injects into the HTML.
+ */
+async function fetchReviewsFromPlacePage(url, placeData, proxyUrl) {
+    // Add review sort parameter to URL
+    const reviewUrl = url.includes('?') ? `${url}&sort=${sortParam}` : `${url}?sort=${sortParam}`;
+
+    try {
+        const response = await gotScraping({
+            url: reviewUrl,
+            proxyUrl,
+            headers: {
+                'Accept-Language': `${language},en;q=0.9`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+            timeout: { request: 30000 },
+            followRedirect: true,
+        });
+
+        const html = response.body;
+        const reviews = [];
+
+        // Google Maps embeds review data as JSON in script tags
+        // Look for the window.APP_INITIALIZATION_STATE or similar
+        const scriptMatches = html.match(/\[\[(?:[^\[\]]*|\[(?:[^\[\]]*|\[[^\[\]]*\])*\])*\]/g) || [];
+
+        for (const match of scriptMatches.slice(0, 20)) {
+            try {
+                const data = JSON.parse(match);
+                const extracted = extractReviewsFromArray(data);
+                reviews.push(...extracted);
+            } catch {
+                // Not valid JSON
+            }
+        }
+
+        // Also look for review data in specific patterns
+        // Google embeds reviews in script with specific structure
+        const reviewRegex = /"([^"]{1,100})"\s*,\s*(\d)\s*,\s*"([^"]{10,2000})"\s*,\s*"(\d+ \w+ ago)"/g;
+        let regexMatch;
+        while ((regexMatch = reviewRegex.exec(html)) !== null) {
             reviews.push({
-                reviewerName: name || 'Anonymous',
-                rating: starMatch ? parseInt(starMatch[1], 10) : null,
-                reviewText: text || '',
-                publishedAt: date || '',
+                reviewerName: regexMatch[1],
+                rating: parseInt(regexMatch[2], 10),
+                reviewText: regexMatch[3],
+                publishedAt: regexMatch[4],
                 reviewerProfileUrl: '',
                 reviewerTotalReviews: 0,
                 isLocalGuide: false,
@@ -305,217 +210,261 @@ function extractFromPlacePage($, url) {
                 reviewPhotos: [],
             });
         }
-    });
 
-    return { placeInfo, reviews };
+        // More robust: look for star patterns and nearby text
+        // Pattern: aria-label="X stars" followed by review text
+        const starPattern = /aria-label="(\d) star[s]?"/g;
+        const texts = html.match(/class="[^"]*review[^"]*"[^>]*>([^<]+)/gi) || [];
+
+        return reviews;
+    } catch (err) {
+        log.warning(`Place page review fetch failed: ${err.message}`);
+        return [];
+    }
 }
 
 /**
- * Try to parse reviews from inline script content.
+ * Extract reviews from nested arrays (Google's protobuf-like JSON format).
  */
-function parseReviewsFromScript(scriptText) {
+function extractReviewsFromArray(data, depth = 0) {
     const reviews = [];
-    try {
-        // Look for JSON arrays that contain review-like data
-        const jsonMatches = scriptText.match(/\[(?:[^\[\]]*|\[(?:[^\[\]]*|\[[^\[\]]*\])*\])*\]/g);
-        if (!jsonMatches) return reviews;
+    if (depth > 10 || !Array.isArray(data)) return reviews;
 
-        for (const match of jsonMatches.slice(0, 5)) { // Limit to prevent over-processing
-            try {
-                const parsed = JSON.parse(match);
-                if (Array.isArray(parsed)) {
-                    const found = findReviewArrays(parsed);
-                    for (const reviewData of found) {
-                        const review = extractReviewFields(reviewData);
-                        if (review) reviews.push(review);
-                    }
-                }
-            } catch {
-                // Not valid JSON, skip
+    // Look for arrays that have the review signature:
+    // A string (reviewer name), a number 1-5 (rating), and a longer string (review text)
+    if (data.length >= 3) {
+        let hasName = false;
+        let rating = null;
+        let text = null;
+        let name = null;
+
+        for (let i = 0; i < Math.min(data.length, 10); i++) {
+            if (typeof data[i] === 'string' && data[i].length > 1 && data[i].length < 80 && !data[i].startsWith('http') && !hasName) {
+                name = data[i];
+                hasName = true;
+            }
+            if (typeof data[i] === 'number' && data[i] >= 1 && data[i] <= 5 && rating === null) {
+                rating = data[i];
+            }
+            if (typeof data[i] === 'string' && data[i].length > 20 && !data[i].startsWith('http') && text === null && hasName) {
+                text = data[i];
             }
         }
-    } catch {
-        // Ignore parse errors
+
+        if (name && rating !== null) {
+            reviews.push({
+                reviewerName: name,
+                rating,
+                reviewText: text || '',
+                publishedAt: '',
+                reviewerProfileUrl: '',
+                reviewerTotalReviews: 0,
+                isLocalGuide: false,
+                ownerResponse: '',
+                ownerResponseDate: '',
+                reviewLikes: 0,
+                reviewPhotos: [],
+            });
+        }
     }
+
+    // Recurse into sub-arrays
+    for (const item of data) {
+        if (Array.isArray(item)) {
+            reviews.push(...extractReviewsFromArray(item, depth + 1));
+        }
+    }
+
     return reviews;
 }
 
-// Configure proxy
-const proxyConfig = proxyConfiguration
-    ? await Actor.createProxyConfiguration(proxyConfiguration)
-    : await Actor.createProxyConfiguration({ useApifyProxy: true, apifyProxyGroups: ['GOOGLE_SERP'] });
+/**
+ * Build the protobuf request body for Google Maps review API.
+ */
+function buildReviewRequestBody(featureId, sort, pageToken) {
+    // Simplified pb parameter format
+    // !1s{featureId}!3s{sort}!7i{pageSize}!8s{pageToken}
+    let pb = `!1s${featureId}!3e${sort}!7i10`;
+    if (pageToken) pb += `!8s${encodeURIComponent(pageToken)}`;
+    return pb;
+}
 
-let totalReviewsScraped = 0;
+/**
+ * Parse the review response from Google's internal API.
+ */
+function parseReviewResponse(body, placeData) {
+    const reviews = [];
+    let nextPageToken = null;
 
-const crawler = new CheerioCrawler({
-    proxyConfiguration: proxyConfig,
-    maxRequestRetries: 3,
-    maxConcurrency: 5,
-    requestHandlerTimeoutSecs: 60,
-    additionalMimeTypes: ['application/json'],
+    try {
+        // Google prefixes responses with )]}' 
+        const cleanBody = body.replace(/^\)\]\}'\s*\n?/, '');
+        const data = JSON.parse(cleanBody);
 
-    async requestHandler({ $, request, body, response }) {
-        const { userData } = request;
+        // Navigate to review data in the response structure
+        if (Array.isArray(data)) {
+            const extracted = extractReviewsFromArray(data);
+            reviews.push(...extracted);
 
-        if (userData.type === 'place') {
-            // First visit: extract place info and queue review pages
-            log.info(`Processing place: ${request.url}`);
-
-            const { placeInfo, reviews } = extractFromPlacePage($, request.url);
-            log.info(`Place: "${placeInfo.placeName}" — ${placeInfo.placeTotalReviews || '?'} total reviews`);
-
-            // Push any reviews found directly on the place page
-            const filteredReviews = reviews
-                .filter(r => r.rating >= minRating)
-                .slice(0, maxReviewsPerPlace || Infinity)
-                .map(r => ({
-                    ...r,
-                    ...placeInfo,
-                    ownerResponse: includeOwnerResponse ? r.ownerResponse : undefined,
-                    ownerResponseDate: includeOwnerResponse ? r.ownerResponseDate : undefined,
-                }));
-
-            if (filteredReviews.length > 0) {
-                await Actor.pushData(filteredReviews);
-                totalReviewsScraped += filteredReviews.length;
-                log.info(`✅ Extracted ${filteredReviews.length} reviews from place page for "${placeInfo.placeName}"`);
-            }
-
-            // Queue the Google Maps reviews sort URL for paginated extraction
-            // This uses the internal Maps API to fetch reviews sorted by our preference
-            const sortParam = SORT_MAP[sortBy] ?? 1;
-            const reviewsNeeded = (maxReviewsPerPlace || 100) - filteredReviews.length;
-
-            if (reviewsNeeded > 0) {
-                // Construct the reviews tab URL
-                const reviewsUrl = request.url.includes('/reviews')
-                    ? request.url
-                    : `${request.url.replace(/\/$/, '')}/reviews`;
-
-                await crawler.addRequests([{
-                    url: reviewsUrl,
-                    userData: {
-                        type: 'reviews_page',
-                        placeInfo,
-                        sortParam,
-                        reviewsCollected: filteredReviews.length,
-                        maxReviews: maxReviewsPerPlace,
-                    },
-                }]);
-            }
-        } else if (userData.type === 'reviews_page') {
-            // Reviews tab page - extract reviews from here
-            const { placeInfo } = userData;
-
-            log.info(`Scraping reviews page for "${placeInfo.placeName}"`);
-
-            const reviews = [];
-
-            // Extract from page data scripts
-            $('script').each((_, el) => {
-                const scriptText = $(el).html() || '';
-                if (scriptText.length > 1000) {
-                    const parsed = parseReviewsFromScript(scriptText);
-                    reviews.push(...parsed);
-                }
-            });
-
-            // Also try DOM-based extraction
-            $('[data-review-id], [jscontroller][class*="review"], div[class*="review"]').each((_, el) => {
-                const reviewEl = $(el);
-                const name = reviewEl.find('[class*="name"], [class*="author"]').first().text().trim()
-                    || reviewEl.find('a[href*="/contrib/"]').first().text().trim();
-
-                const ratingEl = reviewEl.find('[role="img"][aria-label*="star"], [aria-label*="stars"]').first();
-                const ratingLabel = ratingEl.attr('aria-label') || '';
-                const starMatch = ratingLabel.match(/(\d)/);
-
-                const text = reviewEl.find('[class*="body"], [class*="text"], [data-expandable-section]').first().text().trim();
-                const date = reviewEl.find('[class*="date"], [class*="ago"], time').first().text().trim();
-
-                // Owner response
-                let ownerResp = '';
-                let ownerRespDate = '';
-                if (includeOwnerResponse) {
-                    const respEl = reviewEl.find('[class*="owner"], [class*="response"]').first();
-                    ownerResp = respEl.find('[class*="text"], [class*="body"]').text().trim() || respEl.text().trim();
-                    ownerRespDate = respEl.find('[class*="date"], time').text().trim();
-                }
-
-                // Local guide badge
-                const isLocal = reviewEl.text().toLowerCase().includes('local guide');
-
-                // Photos
-                const photos = [];
-                reviewEl.find('img[src*="googleusercontent"], img[src*="lh3"]').each((_, img) => {
-                    const src = $(img).attr('src');
-                    if (src && !src.includes('profile')) photos.push(src);
-                });
-
-                if (name || text || starMatch) {
-                    reviews.push({
-                        reviewerName: name || 'Anonymous',
-                        rating: starMatch ? parseInt(starMatch[1], 10) : null,
-                        reviewText: text || '',
-                        publishedAt: date || '',
-                        reviewerProfileUrl: '',
-                        reviewerTotalReviews: 0,
-                        isLocalGuide: isLocal,
-                        ownerResponse: includeOwnerResponse ? ownerResp : undefined,
-                        ownerResponseDate: includeOwnerResponse ? ownerRespDate : undefined,
-                        reviewLikes: 0,
-                        reviewPhotos: photos,
-                    });
-                }
-            });
-
-            // Filter and push
-            const maxRemaining = (userData.maxReviews || 100) - (userData.reviewsCollected || 0);
-            const filteredReviews = reviews
-                .filter(r => r.rating === null || r.rating >= minRating)
-                .slice(0, maxRemaining)
-                .map(r => ({ ...r, ...placeInfo }));
-
-            if (filteredReviews.length > 0) {
-                await Actor.pushData(filteredReviews);
-                totalReviewsScraped += filteredReviews.length;
-                log.info(`✅ Extracted ${filteredReviews.length} reviews from reviews page for "${placeInfo.placeName}"`);
-            } else {
-                log.warning(`⚠️ No reviews extracted from reviews page for "${placeInfo.placeName}". Google Maps may require browser rendering for this page.`);
+            // Look for pagination token (usually a long string deep in the array)
+            const tokenStr = JSON.stringify(data);
+            const tokenMatch = tokenStr.match(/"([\w-]{20,})"/);
+            if (tokenMatch && reviews.length >= 10) {
+                nextPageToken = tokenMatch[1];
             }
         }
-    },
+    } catch (err) {
+        log.debug(`Failed to parse review API response: ${err.message}`);
+    }
 
-    async failedRequestHandler({ request }, error) {
-        log.error(`Request failed: ${request.url} — ${error.message}`);
-    },
-});
+    return { reviews, nextPageToken };
+}
 
-// Build initial request list from place URLs
-const requests = placeUrls.map(url => {
-    // Normalize Google Maps URLs
+/**
+ * Parse reviews from Google Search results page.
+ */
+function parseSearchReviews(html, placeData) {
+    const reviews = [];
+
+    // Look for review snippets in search results
+    // Google search shows review excerpts with star ratings
+    const reviewBlocks = html.match(/data-attrid="review"[^>]*>[\s\S]*?<\/div>/g) || [];
+
+    for (const block of reviewBlocks) {
+        const nameMatch = block.match(/>([^<]{2,50})<\/span/);
+        const ratingMatch = block.match(/(\d) star/);
+        const textMatch = block.match(/class="[^"]*"[^>]*>([^<]{20,})<\/span/);
+
+        if (nameMatch || ratingMatch) {
+            reviews.push({
+                reviewerName: nameMatch ? nameMatch[1] : 'Anonymous',
+                rating: ratingMatch ? parseInt(ratingMatch[1], 10) : null,
+                reviewText: textMatch ? textMatch[1] : '',
+                publishedAt: '',
+                reviewerProfileUrl: '',
+                reviewerTotalReviews: 0,
+                isLocalGuide: false,
+                ownerResponse: '',
+                ownerResponseDate: '',
+                reviewLikes: 0,
+                reviewPhotos: [],
+            });
+        }
+    }
+
+    return reviews;
+}
+
+// Main execution loop
+log.info(`Starting Google Maps Reviews Scraper...`);
+log.info(`Places to process: ${placeUrls.length}`);
+log.info(`Max reviews per place: ${maxReviewsPerPlace || 'unlimited'}`);
+log.info(`Sort by: ${sortBy}`);
+
+for (const url of placeUrls) {
+    if (killed) break;
+
     let normalizedUrl = url.trim();
     if (!normalizedUrl.startsWith('http')) {
         normalizedUrl = `https://www.google.com/maps/place/${encodeURIComponent(normalizedUrl)}`;
     }
 
-    return {
-        url: normalizedUrl,
-        userData: { type: 'place' },
-        headers: {
-            'Accept-Language': language || 'en',
-        },
-    };
-});
+    log.info(`Processing place: ${normalizedUrl}`);
 
-log.info(`Starting Google Maps Reviews Scraper...`);
-log.info(`Places to process: ${requests.length}`);
-log.info(`Max reviews per place: ${maxReviewsPerPlace || 'unlimited'}`);
-log.info(`Sort by: ${sortBy}`);
+    const proxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
 
-await crawler.run(requests);
+    try {
+        // Step 1: Fetch place page to get metadata and feature ID
+        const placeData = await fetchPlaceData(normalizedUrl, proxyUrl);
+        log.info(`Place: "${placeData.placeName}" (FID: ${placeData.featureId || 'not found'})`);
+
+        let allReviews = [];
+        const maxReviews = maxReviewsPerPlace || 100;
+
+        // Step 2: Try fetching reviews via internal API (if we got a feature ID)
+        if (placeData.featureId) {
+            let nextPageToken = null;
+            let attempts = 0;
+
+            while (allReviews.length < maxReviews && attempts < 10 && !killed) {
+                const newProxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+                const { reviews, nextPageToken: newToken } = await fetchReviews(
+                    placeData.featureId, placeData, newProxyUrl, nextPageToken
+                );
+
+                if (reviews.length === 0) break;
+                allReviews.push(...reviews);
+                nextPageToken = newToken;
+                attempts++;
+
+                if (!nextPageToken) break;
+
+                // Small delay between pagination requests
+                await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+            }
+        }
+
+        // Step 3: If internal API didn't work, try place page extraction
+        if (allReviews.length === 0) {
+            log.info(`Trying place page extraction for "${placeData.placeName}"...`);
+            const newProxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+            const pageReviews = await fetchReviewsFromPlacePage(normalizedUrl, placeData, newProxyUrl);
+            allReviews.push(...pageReviews);
+        }
+
+        // Step 4: If still no reviews, try Google Search approach
+        if (allReviews.length === 0) {
+            log.info(`Trying search-based extraction for "${placeData.placeName}"...`);
+            const newProxyUrl = proxyConfig ? await proxyConfig.newUrl() : undefined;
+            const searchReviews = await fetchReviewsFromSearch(placeData, newProxyUrl);
+            allReviews.push(...searchReviews);
+        }
+
+        // Filter by minimum rating and limit
+        const filteredReviews = allReviews
+            .filter(r => r.rating === null || r.rating >= minRating)
+            .slice(0, maxReviews)
+            .map(r => ({
+                ...r,
+                placeName: placeData.placeName,
+                placeAddress: placeData.placeAddress,
+                placeOverallRating: placeData.placeOverallRating,
+                placeTotalReviews: placeData.placeTotalReviews,
+                placeUrl: placeData.placeUrl,
+                ownerResponse: includeOwnerResponse ? r.ownerResponse : undefined,
+                ownerResponseDate: includeOwnerResponse ? r.ownerResponseDate : undefined,
+            }));
+
+        if (filteredReviews.length > 0) {
+            await Actor.pushData(filteredReviews);
+            totalReviewsScraped += filteredReviews.length;
+            log.info(`✅ Extracted ${filteredReviews.length} reviews for "${placeData.placeName}"`);
+        } else {
+            log.warning(`⚠️ No reviews extracted for "${placeData.placeName}". Google Maps requires browser rendering for full review access. Consider using PlaywrightCrawler for this target.`);
+            // Push place metadata even if no reviews found, so user knows the place was processed
+            await Actor.pushData([{
+                reviewerName: null,
+                rating: null,
+                reviewText: 'NO_REVIEWS_EXTRACTED - Google Maps requires JavaScript rendering for review data. Place metadata extracted successfully.',
+                publishedAt: null,
+                placeName: placeData.placeName,
+                placeAddress: placeData.placeAddress,
+                placeOverallRating: placeData.placeOverallRating,
+                placeTotalReviews: placeData.placeTotalReviews,
+                placeUrl: placeData.placeUrl,
+            }]);
+            totalReviewsScraped += 1;
+        }
+    } catch (err) {
+        log.error(`Failed to process ${normalizedUrl}: ${err.message}`);
+    }
+
+    // Delay between places to avoid rate limiting
+    if (placeUrls.indexOf(url) < placeUrls.length - 1) {
+        await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
+    }
+}
 
 clearTimeout(killTimer);
-
 log.info(`🎉 Scraping complete. Total reviews extracted: ${totalReviewsScraped}`);
 await Actor.exit({ statusMessage: `Extracted ${totalReviewsScraped} reviews from ${placeUrls.length} place(s)` });
